@@ -32,13 +32,15 @@ def get_config():
     """
     return {
         # Số luồng chạy cùng lúc (1 = chạy từng acc, 5-20 = chạy đa luồng tùy cấu hình máy & số acc)
-        "THREADS": 5,
+        "THREADS": 10,
 
-        # Cấp độ mục tiêu. Khi đạt >= TARGET_LEVEL, bot dừng mua upgrade để tích lũy 100% GEMS
+        # Cấp độ mục tiêu
         "TARGET_LEVEL": 15,
 
-        # Tự động nâng cấp để lấy +100 XP mỗi lần (chỉ chạy khi level < TARGET_LEVEL)
+        # Tự động nâng cấp: Tập trung tối đa Tốc độ đào (Speed), giới hạn Power <= 507 và Cap Mana <= 1000
         "AUTO_UPGRADE": True,
+        "MAX_MINING_POWER": 507,
+        "MAX_ENERGY_CAP": 1000,
 
         # Tự động đổi toàn bộ quặng thô (Iron Ore, Coal, Copper Ore...) sang GEMS
         "AUTO_SWAP_ORES": True,
@@ -53,10 +55,14 @@ def get_config():
         "QUEST_DELAY_MIN": 5.0,
         "QUEST_DELAY_MAX": 7.0,
 
-        # Số máy đào tối đa cho phép chạy cùng lúc trên 1 acc khi dư năng lượng (1-5 máy)
-        "MAX_MINERS": 4,
+        # Số máy đào tối đa cho phép chạy cùng lúc trên 1 acc (đặt cao để xả hết 1000 mana vào bãi lớn nhất)
+        "MAX_MINERS": 50,
 
-        # Mỏ đào ưu tiên mặc định (Greenstone Quarry = 600 giây = 10 phút, tốn 10 Energy)
+        # Giãn cách giữa mỗi round (180 - 240 phút = 3 - 4 tiếng) để tiết kiệm proxy
+        "ROUND_DELAY_MIN_MINUTES": 180,
+        "ROUND_DELAY_MAX_MINUTES": 240,
+
+        # Mỏ đào mặc định dự phòng
         "MINING_LOCATION_ID": "greenstone-quarry",
 
         # Mã Ref mặc định
@@ -107,6 +113,8 @@ class Colors:
 
 
 print_lock = threading.Lock()
+file_lock = threading.Lock()
+LOG_FILE = "log.txt"
 
 
 def log(acc_idx, msg, color=Colors.RESET):
@@ -115,6 +123,32 @@ def log(acc_idx, msg, color=Colors.RESET):
     tag = f"[Acc {acc_idx}]" if acc_idx is not None else "[BOT]"
     with print_lock:
         print(f"{Colors.DIM}[{now}]{Colors.RESET} {Colors.CYAN}{tag:<8}{Colors.RESET} {color}{msg}{Colors.RESET}", flush=True)
+
+
+def reset_log_file(cycle: int):
+    """Xóa sạch file log.txt vào đầu mỗi round để chống tràn data"""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with file_lock:
+        try:
+            with open(LOG_FILE, "w", encoding="utf-8") as f:
+                f.write(f"# ROUND #{cycle} - Cập nhật lúc: {now_str}\n")
+                f.write("# Ví | X Username | Point | Rank\n")
+                f.flush()
+        except Exception as e:
+            log(None, f"Lỗi làm mới {LOG_FILE}: {e}", Colors.RED)
+
+
+def append_log_file(wallet: str, x_username: str, point_str: str, rank_str: str):
+    """Ghi thông tin tài khoản vào log.txt theo thời gian thực (Thread-safe)"""
+    x_clean = f"@{x_username.lstrip('@')}" if x_username else "Chưa liên kết"
+    line = f"{wallet} | {x_clean} | {point_str} | {rank_str}\n"
+    with file_lock:
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+        except Exception as e:
+            log(None, f"Lỗi ghi {LOG_FILE}: {e}", Colors.RED)
 
 
 def format_rewards(rewards_data) -> str:
@@ -470,7 +504,11 @@ class BullshotClient:
                 "unlocked": bool(loc.get("unlocked", loc.get("isUnlocked", True))),
             })
 
-        locations.sort(key=lambda x: x["energyCost"])
+        # Sắp xếp giảm dần theo Level yêu cầu -> Năng lượng -> Power để luôn ưu tiên bãi lớn nhất
+        locations.sort(
+            key=lambda x: (x["requiredLevel"], x["energyCost"], x["requiredPower"]),
+            reverse=True,
+        )
         return locations if locations else [default_loc]
 
     def run_mining(self) -> int:
@@ -504,9 +542,10 @@ class BullshotClient:
             self.run_swap_ores()
             self.run_upgrades()
 
-        max_miners = max(1, int(CONFIG.get("MAX_MINERS", 4)))
+        max_miners = max(1, int(CONFIG.get("MAX_MINERS", 50)))
 
-        # 2. Nếu chưa đạt số máy tối đa, kiểm tra NL và thả thêm máy đào
+        # 2. Thả máy đào ưu tiên bãi lớn nhất có thể (VD: 120 NL -> 4 bãi 25 + 1 bãi 20)
+        deployed_counts = {}
         if len(active_positions) < max_miners:
             self.refresh_user()
             energy = int(self.user_data.get("energy", 0))
@@ -517,22 +556,11 @@ class BullshotClient:
             min_cost = min((loc["energyCost"] for loc in locations), default=10)
 
             if energy >= min_cost:
-                active_loc_ids = {p.get("locationId") for p in active_positions if p.get("locationId")}
                 blocked_loc_ids = set()
-                deployed_summary = []
 
                 while len(active_positions) < max_miners and energy >= min_cost:
-                    # Tìm danh sách mỏ đủ điều kiện (ưu tiên mỏ chưa có máy đang chạy trước)
-                    eligible_unoccupied = [
-                        loc for loc in locations
-                        if loc["id"] not in blocked_loc_ids
-                        and loc["id"] not in active_loc_ids
-                        and loc["unlocked"]
-                        and user_level >= loc["requiredLevel"]
-                        and mining_power >= loc["requiredPower"]
-                        and energy >= loc["energyCost"]
-                    ]
-                    eligible_any = [
+                    # Chọn bãi lớn nhất đủ điều kiện (locations đã được sort từ bãi to nhất xuống nhỏ nhất)
+                    eligible = [
                         loc for loc in locations
                         if loc["id"] not in blocked_loc_ids
                         and loc["unlocked"]
@@ -541,10 +569,10 @@ class BullshotClient:
                         and energy >= loc["energyCost"]
                     ]
 
-                    target_loc = (eligible_unoccupied or eligible_any or [None])[0]
-                    if not target_loc:
+                    if not eligible:
                         break
 
+                    target_loc = eligible[0]
                     loc_id = target_loc["id"]
                     resp_deploy = self.request("POST", "/mining/positions", {"locationId": loc_id})
                     if resp_deploy and resp_deploy.status_code == 200:
@@ -559,29 +587,30 @@ class BullshotClient:
                             "locationName": target_loc["name"],
                             "remainingSeconds": dur,
                         })
-                        active_loc_ids.add(loc_id)
-                        deployed_summary.append(f"{target_loc['name']} ({dur // 60}p)")
+                        label = f"{target_loc['name']} ({target_loc['energyCost']}NL/{dur // 60}p)"
+                        deployed_counts[label] = deployed_counts.get(label, 0) + 1
                     else:
-                        # Nếu mỏ này không cho thả thêm hoặc đã đạt giới hạn vị trí
                         blocked_loc_ids.add(loc_id)
                         err_text = (resp_deploy.text.lower() if resp_deploy and resp_deploy.text else "")
                         if "max" in err_text or "limit" in err_text:
                             break
 
-                if deployed_summary:
+                if deployed_counts:
+                    summary_parts = [f"{cnt}x {lbl}" for lbl, cnt in deployed_counts.items()]
+                    total_dep = sum(deployed_counts.values())
                     log(
                         self.acc_idx,
-                        f"Đào {len(deployed_summary)} máy: {', '.join(deployed_summary)} (NL còn: {energy})",
+                        f"Đào {total_dep} bãi: {', '.join(summary_parts)} (NL còn: {energy})",
                         Colors.YELLOW,
                     )
 
-        # 3. Trả về thời gian chờ của máy đào sẽ chín sớm nhất
+        # 3. Trả về thời gian chờ của máy đào
         if active_positions:
             min_rem = min(int(p.get("remainingSeconds", 600)) for p in active_positions)
-            if not locals().get("deployed_summary"):
+            if not deployed_counts:
                 log(
                     self.acc_idx,
-                    f"Đang chạy {len(active_positions)} máy đào (xong sớm nhất sau {min_rem // 60}p {min_rem % 60}s)",
+                    f"Đang chạy {len(active_positions)} bãi đào (sớm nhất còn {min_rem // 60}p {min_rem % 60}s)",
                     Colors.YELLOW,
                 )
             return max(5, min_rem)
@@ -626,47 +655,93 @@ class BullshotClient:
             )
 
     def run_upgrades(self):
+        """
+        Tự động nâng cấp:
+        - Tập trung ưu tiên số 1 vào Tốc độ đào (Speed)
+        - Mua Power tối đa đến MAX_MINING_POWER (507)
+        - Mua Cap Mana tối đa đến MAX_ENERGY_CAP (1000)
+        """
         if not CONFIG["AUTO_UPGRADE"]:
             return
 
-        self.refresh_user()
-        current_level = self.user_data.get("level", 1)
-        target_level = CONFIG["TARGET_LEVEL"]
+        max_power = int(CONFIG.get("MAX_MINING_POWER", 507))
+        max_energy_cap = int(CONFIG.get("MAX_ENERGY_CAP", 1000))
+        failed_ids = set()
 
-        if current_level >= target_level:
-            return
-
-        resp_upg = self.request("GET", "/upgrades")
-        if not resp_upg or resp_upg.status_code != 200:
-            return
-
-        upgrades = resp_upg.json() or []
-        priority_order = ["upg-power-1", "upg-energy-1", "upg-speed-1"]
-
-        for upg_id in priority_order:
+        for _ in range(15):
             self.refresh_user()
-            if self.user_data.get("level", 1) >= target_level:
+            current_gems = float(self.user_data.get("gems", 0))
+            mining_power = int(self.user_data.get("miningPower") or self.user_data.get("power") or 10)
+            energy_cap = int(self.user_data.get("energyCapacity") or self.user_data.get("maxEnergy") or 100)
+
+            resp_upg = self.request("GET", "/upgrades")
+            if not resp_upg or resp_upg.status_code != 200:
                 break
 
-            current_gems = self.user_data.get("gems", 0)
-            target_upg = next((u for u in upgrades if u.get("id") == upg_id), None)
-            if not target_upg:
-                continue
+            raw_upgs = resp_upg.json()
+            upgrades = raw_upgs if isinstance(raw_upgs, list) else (raw_upgs.get("upgrades") or [])
+            if not upgrades:
+                break
 
-            cost = target_upg.get("cost", 999999)
-            if current_gems >= cost:
-                resp_buy = self.request("POST", f"/upgrades/{upg_id}")
-                if resp_buy and resp_buy.status_code == 200:
-                    new_user = resp_buy.json().get("user") or {}
-                    new_lvl = new_user.get("level", current_level)
-                    new_xp = new_user.get("xp", 0)
-                    log(
-                        self.acc_idx,
-                        f"Nâng cấp: {target_upg.get('name')} (-{cost} GEMS) -> Lv {new_lvl} ({new_xp} XP)",
-                        Colors.MAGENTA,
-                    )
+            candidates = []
+            for u in upgrades:
+                if not isinstance(u, dict):
+                    continue
+                uid = u.get("id")
+                if not uid or uid in failed_ids:
+                    continue
+                if u.get("purchased") is True or u.get("isPurchased") is True:
+                    continue
+                if u.get("unlocked") is False or u.get("isUnlocked") is False:
+                    continue
+                max_lvl = u.get("maxLevel")
+                cur_lvl = u.get("level", 0)
+                if max_lvl is not None and cur_lvl >= max_lvl:
+                    continue
+
+                cost = float(u.get("cost", 999999999))
+                if current_gems < cost:
+                    continue
+
+                text = f"{uid} {u.get('name', '')} {u.get('type', '')} {u.get('category', '')}".lower()
+                if any(k in text for k in ("speed", "fast", "time", "duration", "haste")):
+                    prio = 0  # Ưu tiên 1: Tốc độ đào
+                elif any(k in text for k in ("power", "strength", "drill", "pickaxe", "dmg")):
+                    if mining_power >= max_power:
+                        continue
+                    prio = 1  # Ưu tiên 2: Power (max 507)
+                elif any(k in text for k in ("energy", "mana", "cap", "battery", "stamina")):
+                    if energy_cap >= max_energy_cap:
+                        continue
+                    prio = 2  # Ưu tiên 3: Cap Mana (max 1000)
                 else:
-                    break
+                    continue
+
+                candidates.append((prio, cost, u))
+
+            if not candidates:
+                break
+
+            # Sắp xếp ưu tiên Speed trước -> Power -> Energy, cùng loại chọn giá rẻ trước
+            candidates.sort(key=lambda x: (x[0], x[1]))
+            _, cost, target_upg = candidates[0]
+            upg_id = target_upg.get("id")
+
+            resp_buy = self.request("POST", f"/upgrades/{upg_id}")
+            if resp_buy and resp_buy.status_code == 200:
+                new_user = resp_buy.json().get("user") or {}
+                if new_user:
+                    self.user_data.update(new_user)
+                new_lvl = self.user_data.get("level", 1)
+                new_pwr = self.user_data.get("miningPower") or self.user_data.get("power") or mining_power
+                new_cap = self.user_data.get("energyCapacity") or self.user_data.get("maxEnergy") or energy_cap
+                log(
+                    self.acc_idx,
+                    f"Nâng cấp: {target_upg.get('name', upg_id)} (-{int(cost)} GEMS) -> Lv.{new_lvl} | PWR: {new_pwr} | Mana: {new_cap}",
+                    Colors.MAGENTA,
+                )
+            else:
+                failed_ids.add(upg_id)
 
     def run_staking(self):
         if CONFIG["AUTO_CLAIM_STAKING"]:
@@ -712,6 +787,44 @@ class BullshotClient:
                 r_c = self.request("POST", "/referral/claim")
                 if r_c and r_c.status_code == 200:
                     log(self.acc_idx, f"Claim Ref: {Colors.GREEN}+{pending} GEMS{Colors.RESET}")
+
+    def get_user_rank(self) -> str:
+        """Lấy thứ hạng (Rank) hiện tại của ví từ thông tin user hoặc bảng xếp hạng"""
+        lvl = self.user_data.get("level", 1)
+        rank = (
+            self.user_data.get("rank")
+            or self.user_data.get("leaderboardRank")
+            or self.user_data.get("userRank")
+        )
+        if rank is None:
+            resp = self.request("GET", "/leaderboard")
+            if resp and resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict):
+                    rank = (
+                        data.get("userRank")
+                        or data.get("myRank")
+                        or data.get("rank")
+                        or (data.get("currentUser") or {}).get("rank")
+                    )
+                    entries = data.get("leaderboard") or data.get("entries") or data.get("users") or []
+                elif isinstance(data, list):
+                    entries = data
+                else:
+                    entries = []
+
+                if rank is None and entries:
+                    for i, entry in enumerate(entries, 1):
+                        if isinstance(entry, dict):
+                            w = (entry.get("walletAddress") or entry.get("address") or "").lower()
+                            if w == self.wallet_address:
+                                rank = entry.get("rank") or i
+                                break
+
+        if rank is not None:
+            return f"#{rank} (Lv.{lvl})"
+        title = self.user_data.get("rankTitle") or self.user_data.get("title")
+        return f"Lv.{lvl} ({title})" if title else f"Lv.{lvl}"
 
 
 # ==================== XỬ LÝ TỪNG ACC (WORKER) ====================
@@ -764,7 +877,19 @@ def process_account(idx: int, acc: dict, proxies: list) -> float:
     gems = user.get("gems", 0)
     energy = user.get("energy", 0)
     energy_cap = user.get("energyCapacity", 100)
-    log(idx, f"Xong | Lv {lvl} ({xp} XP) | {Colors.GREEN}{gems} GEMS{Colors.RESET} | NL: {energy}/{energy_cap}")
+    x_handle = user.get("twitterHandle") or client.user_data.get("twitterHandle") or ""
+    rank_str = client.get_user_rank()
+
+    # Ghi real-time vào log.txt (đã khóa luồng bằng file_lock)
+    point_str = f"{gems} GEMS ({xp} XP)"
+    append_log_file(
+        wallet=client.wallet_address,
+        x_username=x_handle,
+        point_str=point_str,
+        rank_str=rank_str,
+    )
+
+    log(idx, f"Xong | {rank_str} | {Colors.GREEN}{gems} GEMS{Colors.RESET} ({xp} XP) | NL: {energy}/{energy_cap}")
 
     return time.time() + wait_time
 
@@ -819,7 +944,8 @@ def main():
 
     cycle = 1
     while True:
-        log(None, f"--- Bắt đầu chu kỳ #{cycle} ---", Colors.BOLD)
+        reset_log_file(cycle)
+        log(None, f"--- Bắt đầu chu kỳ #{cycle} (Đã làm mới {LOG_FILE}) ---", Colors.BOLD)
         earliest_ready_at = time.time() + 600
 
         if threads == 1:
@@ -843,18 +969,24 @@ def main():
                         log(idx, f"Lỗi luồng: {e}", Colors.RED)
 
         cycle += 1
-        remaining_wait = int(earliest_ready_at - time.time()) + 5
-        if remaining_wait <= 5:
-            log(None, "Mỏ của các acc đầu đã đào xong! Chuyển sang chu kỳ tiếp theo ngay...", Colors.CYAN)
-            continue
+        min_mins = int(CONFIG.get("ROUND_DELAY_MIN_MINUTES", 180))
+        max_mins = int(CONFIG.get("ROUND_DELAY_MAX_MINUTES", 240))
+        sleep_mins = random.randint(min_mins, max(min_mins, max_mins))
+        remaining_wait = sleep_mins * 60
 
-        log(None, f"Đã chạy xong toàn bộ {len(accounts)} acc. Nghỉ {remaining_wait // 60}p {remaining_wait % 60}s chờ mỏ chín...", Colors.CYAN)
+        log(
+            None,
+            f"Đã chạy xong toàn bộ {len(accounts)} acc. Nghỉ {sleep_mins} phút ({sleep_mins // 60}h {sleep_mins % 60}p) để tiết kiệm proxy...",
+            Colors.CYAN,
+        )
 
         for s in range(remaining_wait, 0, -10):
-            sys.stdout.write(f"\r{Colors.DIM}[Đếm ngược] Chờ {s // 60}p {s % 60}s...{Colors.RESET}   ")
+            sys.stdout.write(
+                f"\r{Colors.DIM}[Đếm ngược] Round tiếp theo sau: {s // 3600}h {(s % 3600) // 60}p {s % 60}s...{Colors.RESET}   "
+            )
             sys.stdout.flush()
             time.sleep(min(10, s))
-        sys.stdout.write("\r" + " " * 50 + "\r")
+        sys.stdout.write("\r" + " " * 60 + "\r")
         sys.stdout.flush()
 
 
