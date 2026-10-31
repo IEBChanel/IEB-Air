@@ -41,15 +41,16 @@ Bot hỗ trợ **4 định dạng proxy phổ biến nhất trên thị trườn
 
 ## 3. Các tính năng cốt lõi của Bot
 
-### 💎 Speedrun lên Level 15 (Mục tiêu cho acc ref):
-- Bot tính toán chính xác bảng điểm kinh nghiệm XP của game:
-  - Cần **31,998 XP** để chạm mốc **Level 15 (Deep Core Driller)**.
-- **Cơ chế tối ưu:**
-  1. Làm nhiệm vụ mở đầu đưa ví từ **Lv 1 lên Lv 4** trong 2 phút.
-  2. Mỗi lần thu hoạch mỏ nhận **+75 XP**.
-  3. **Mỗi lần mua Nâng cấp (Upgrade) nhận ngay +100 XP**.
-  4. Bot sẽ tự động lấy GEMS đào được để mua các nâng cấp giá rẻ (`Mining Power I` giá 250 GEMS, `Energy Capacity I` giá 270 GEMS), vừa tăng chỉ số đào mỏ vừa húp +100 XP liên tục để cán mốc Level 15 sớm nhất.
-  5. Khi tài khoản đạt **Level $\ge 15$**, bot sẽ **tự động ngắt chế độ mua nâng cấp** để dồn 100% tài nguyên sang tích trữ GEMS và nạp Staking chờ Airdrop!
+### 💎 Quy tắc Nâng cấp (Auto Upgrade) & Khai thác mỏ tối ưu:
+- **Quy tắc Nâng cấp thông minh (`run_upgrades`):**
+  1. **Ưu tiên số 1 — Tốc độ đào (Speed):** Tập trung mua tối đa các gói nâng cấp tốc độ đào trước tiên để rút ngắn thời gian mỗi lượt khai thác.
+  2. **Giới hạn Power (`MAX_MINING_POWER = 507`):** Chỉ mua nâng cấp sức mạnh đào (Mining Power) cho đến khi đạt mốc **507** thì tự động dừng.
+  3. **Giới hạn Cap Mana (`MAX_ENERGY_CAP = 1000`):** Chỉ mua nâng cấp bình năng lượng (Energy Capacity) cho đến tầm **1000** là đủ, sau đó ngưng mua để bảo toàn GEMS.
+- **Ưu tiên đào ở bãi lớn nhất có thể (`run_mining`):**
+  - Bot tự động sắp xếp danh sách bãi đào từ cấp cao nhất xuống thấp nhất mà tài khoản đủ Level & Power.
+  - Dồn toàn bộ năng lượng vào bãi lớn nhất trước, phần năng lượng lẻ còn dư sẽ tự động thả tiếp vào bãi lớn kế tiếp (Ví dụ: Có **120 năng lượng**, bot sẽ tự động thả **4 bãi 25 NL (Lv4) + 1 bãi 20 NL (Lv3)** để tiêu sạch 120 NL).
+- **Giãn cách Round tiết kiệm Proxy (180 – 240 phút):**
+  - Do các bãi cấp cao (như bãi Lv15) có thời gian đào lên tới 5 tiếng, sau khi chạy xong toàn bộ danh sách acc, bot sẽ nghỉ ngẫu nhiên từ **180 đến 240 phút (3 – 4 tiếng)** trước khi bắt đầu round mới để tiết kiệm dung lượng proxy tối đa.
 
 ### 🔄 Auto Swap (Đổi quặng thô sang GEMS):
 - Sau mỗi chu kỳ đào mỏ, bot tự động quét kho đồ và đổi toàn bộ quặng thô sang GEMS theo biểu giá game:
@@ -87,12 +88,14 @@ pip install requests eth-account
 python bullshot.py
 ```
 
-### Bước 3: Xem tiến trình hoạt động
-- Bot hỗ trợ chạy đa luồng và in log tinh giản trên 1 dòng theo từng tài khoản (`[Acc 1]`, `[Acc 2]`...), đồng thời tự động bật màu chuẩn trên Windows CMD (không bị lỗi ký tự `←[...`):
+### Bước 3: Xem tiến trình hoạt động & File `log.txt`
+- **Trên màn hình CMD:** In log tinh giản trên 1 dòng theo từng tài khoản (`[Acc 1]`, `[Acc 2]`...), tự động bật màu ANSI chuẩn trên Windows CMD:
   - `Login`: Hiển thị ví rút gọn, cấp độ, XP, GEMS, năng lượng hiện tại.
   - `Nhiệm vụ`: Chỉ báo khi hoàn thành & nhận thưởng.
-  - `Đào mỏ / Claim mỏ`: Báo kết quả thu hoạch hoặc thời gian đào còn lại.
+  - `Đào mỏ / Claim mỏ`: Báo kết quả thu hoạch và tổng số bãi vừa thả.
   - `Swap quặng / Nâng cấp / Stake`: Gom gọn thành 1 dòng tổng kết mỗi khi thực hiện.
+- **File `log.txt` (Real-time & Thread-safe):**
+  - Tự động xóa làm mới vào đầu mỗi round để chống tràn dữ liệu, khóa luồng (`file_lock`) và ghi trực tiếp ngay khi mỗi acc hoàn thành theo định dạng: `Ví | X Username | Point | Rank`.
 
 ---
 
@@ -101,14 +104,19 @@ Bạn có thể mở file `bullshot.py` và chỉnh trực tiếp trong hàm `ge
 ```python
 def get_config():
     return {
-        "THREADS": 5,                # Số luồng chạy song song (1 = chạy từng acc, 5-20 = đa luồng)
-        "TARGET_LEVEL": 15,          # Đổi level mục tiêu nếu muốn (ví dụ: 10, 15, 20)
-        "AUTO_UPGRADE": True,        # Bật/tắt tự động nâng cấp lấy XP
+        "THREADS": 10,               # Số luồng chạy song song (1 = chạy từng acc, 5-20 = đa luồng)
+        "TARGET_LEVEL": 15,          # Cấp độ mục tiêu
+        "AUTO_UPGRADE": True,        # Bật/tắt tự động nâng cấp
+        "MAX_MINING_POWER": 507,     # Mua Power tối đa đến 507 thì dừng
+        "MAX_ENERGY_CAP": 1000,      # Mua Cap Mana tối đa đến 1000 thì dừng
         "AUTO_SWAP_ORES": True,      # Bật/tắt tự động bán quặng sang GEMS
         "AUTO_STAKE_GEMS": True,     # Bật/tắt tự động Stake đá quý
         "AUTO_CLAIM_STAKING": True,  # Bật/tắt tự động thu hoạch lãi Staking
         "QUEST_DELAY_MIN": 5.0,      # Thời gian delay tối thiểu làm nhiệm vụ (giây)
         "QUEST_DELAY_MAX": 7.0,      # Thời gian delay tối đa làm nhiệm vụ (giây)
+        "MAX_MINERS": 50,            # Số máy đào tối đa cho phép thả cùng lúc để xả hết mana
+        "ROUND_DELAY_MIN_MINUTES": 180, # Giãn cách tối thiểu mỗi round (phút)
+        "ROUND_DELAY_MAX_MINUTES": 240, # Giãn cách tối đa mỗi round (phút)
         "MINING_LOCATION_ID": "greenstone-quarry",
         "DEFAULT_REF": "0x44aca053", # Mã giới thiệu mặc định
     }
