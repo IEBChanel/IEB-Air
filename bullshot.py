@@ -40,7 +40,7 @@ def get_config():
         # Tự động nâng cấp: Đủ Power 250 (mở bãi cuối) + Cap Mana 700 (20 bãi 35 NL), còn lại dồn 100% Max Speed
         "AUTO_UPGRADE": True,
         "MAX_MINING_POWER": 250,
-        "MAX_ENERGY_CAP": 700,
+        "MAX_ENERGY_CAP": 350,
 
         # Tự động đổi toàn bộ quặng thô (Iron Ore, Coal, Copper Ore...) sang GEMS
         "AUTO_SWAP_ORES": True,
