@@ -42,10 +42,10 @@ Bot hỗ trợ **4 định dạng proxy phổ biến nhất trên thị trườn
 ## 3. Các tính năng cốt lõi của Bot
 
 ### 💎 Quy tắc Nâng cấp (Auto Upgrade) & Khai thác mỏ tối ưu:
-- **Quy tắc Nâng cấp thông minh (`run_upgrades`):**
-  1. **Ưu tiên số 1 — Tốc độ đào (Speed):** Tập trung mua tối đa các gói nâng cấp tốc độ đào trước tiên để rút ngắn thời gian mỗi lượt khai thác.
-  2. **Giới hạn Power (`MAX_MINING_POWER = 507`):** Chỉ mua nâng cấp sức mạnh đào (Mining Power) cho đến khi đạt mốc **507** thì tự động dừng.
-  3. **Giới hạn Cap Mana (`MAX_ENERGY_CAP = 1000`):** Chỉ mua nâng cấp bình năng lượng (Energy Capacity) cho đến tầm **1000** là đủ, sau đó ngưng mua để bảo toàn GEMS.
+- **Quy tắc Nâng cấp đua lên Level 25 (`run_upgrades`):**
+  1. **Giới hạn Power (`MAX_MINING_POWER = 250`):** Chỉ mua nâng cấp sức mạnh đào (Mining Power) đến đúng mốc **250** (vừa đủ mở khóa bãi cuối cùng **Void Rift - Lv 20**) thì dừng, tránh lãng phí GEMS nâng thừa Power.
+  2. **Giới hạn Cap Mana (`MAX_ENERGY_CAP = 700`):** Chỉ mua nâng cấp bình năng lượng (Energy Capacity) đến mốc **700** (đủ chạy 20 bãi 35 NL hoặc 14 bãi 50 NL cùng lúc).
+  3. **Dồn 100% phần còn lại vào Max Speed:** Sau khi đạt đủ `250 Power` và `700 Mana`, toàn bộ GEMS sẽ được dồn 100% vào mua **Tốc độ đào (Mining Speed)** để cày XP lên thẳng **Level 25**.
 - **Ưu tiên đào ở bãi lớn nhất có thể (`run_mining`):**
   - Bot tự động sắp xếp danh sách bãi đào từ cấp cao nhất xuống thấp nhất mà tài khoản đủ Level & Power.
   - Dồn toàn bộ năng lượng vào bãi lớn nhất trước, phần năng lượng lẻ còn dư sẽ tự động thả tiếp vào bãi lớn kế tiếp (Ví dụ: Có **120 năng lượng**, bot sẽ tự động thả **4 bãi 25 NL (Lv4) + 1 bãi 20 NL (Lv3)** để tiêu sạch 120 NL).
@@ -105,16 +105,16 @@ Bạn có thể mở file `bullshot.py` và chỉnh trực tiếp trong hàm `ge
 def get_config():
     return {
         "THREADS": 10,               # Số luồng chạy song song (1 = chạy từng acc, 5-20 = đa luồng)
-        "TARGET_LEVEL": 15,          # Cấp độ mục tiêu
+        "TARGET_LEVEL": 25,          # Cấp độ mục tiêu (đạt Lv 25 sẽ dừng mua nâng cấp)
         "AUTO_UPGRADE": True,        # Bật/tắt tự động nâng cấp
-        "MAX_MINING_POWER": 507,     # Mua Power tối đa đến 507 thì dừng
-        "MAX_ENERGY_CAP": 1000,      # Mua Cap Mana tối đa đến 1000 thì dừng
+        "MAX_MINING_POWER": 250,     # Mua Power tối đa đến 250 (đủ mở bãi cuối Void Rift)
+        "MAX_ENERGY_CAP": 700,       # Mua Cap Mana tối đa đến 700 (đủ chạy 20 bãi 35 NL)
         "AUTO_SWAP_ORES": True,      # Bật/tắt tự động bán quặng sang GEMS
         "AUTO_STAKE_GEMS": True,     # Bật/tắt tự động Stake đá quý
         "AUTO_CLAIM_STAKING": True,  # Bật/tắt tự động thu hoạch lãi Staking
         "QUEST_DELAY_MIN": 5.0,      # Thời gian delay tối thiểu làm nhiệm vụ (giây)
         "QUEST_DELAY_MAX": 7.0,      # Thời gian delay tối đa làm nhiệm vụ (giây)
-        "MAX_MINERS": 50,            # Số máy đào tối đa cho phép thả cùng lúc để xả hết mana
+        "MAX_MINERS": 25,            # Số máy đào tối đa chạy cùng lúc trên 1 acc (đủ xả 700 NL)
         "ROUND_DELAY_MIN_MINUTES": 180, # Giãn cách tối thiểu mỗi round (phút)
         "ROUND_DELAY_MAX_MINUTES": 240, # Giãn cách tối đa mỗi round (phút)
         "MINING_LOCATION_ID": "greenstone-quarry",
