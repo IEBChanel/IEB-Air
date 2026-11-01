@@ -34,13 +34,13 @@ def get_config():
         # Số luồng chạy cùng lúc (1 = chạy từng acc, 5-20 = chạy đa luồng tùy cấu hình máy & số acc)
         "THREADS": 10,
 
-        # Cấp độ mục tiêu
-        "TARGET_LEVEL": 15,
+        # Cấp độ mục tiêu (đạt cấp này sẽ ngưng nâng cấp để tích GEMS)
+        "TARGET_LEVEL": 25,
 
-        # Tự động nâng cấp: Tập trung tối đa Tốc độ đào (Speed), giới hạn Power <= 507 và Cap Mana <= 1000
+        # Tự động nâng cấp: Đủ Power 250 (mở bãi cuối) + Cap Mana 700 (20 bãi 35 NL), còn lại dồn 100% Max Speed
         "AUTO_UPGRADE": True,
-        "MAX_MINING_POWER": 507,
-        "MAX_ENERGY_CAP": 1000,
+        "MAX_MINING_POWER": 250,
+        "MAX_ENERGY_CAP": 700,
 
         # Tự động đổi toàn bộ quặng thô (Iron Ore, Coal, Copper Ore...) sang GEMS
         "AUTO_SWAP_ORES": True,
@@ -55,8 +55,8 @@ def get_config():
         "QUEST_DELAY_MIN": 5.0,
         "QUEST_DELAY_MAX": 7.0,
 
-        # Số máy đào tối đa cho phép chạy cùng lúc trên 1 acc (đặt cao để xả hết 1000 mana vào bãi lớn nhất)
-        "MAX_MINERS": 50,
+        # Số máy đào tối đa chạy cùng lúc trên 1 acc (25 máy để thả đủ 20 bãi x 35 NL = 700 NL)
+        "MAX_MINERS": 25,
 
         # Giãn cách giữa mỗi round (180 - 240 phút = 3 - 4 tiếng) để tiết kiệm proxy
         "ROUND_DELAY_MIN_MINUTES": 180,
@@ -114,7 +114,12 @@ class Colors:
 
 print_lock = threading.Lock()
 file_lock = threading.Lock()
+quest_lock = threading.Lock()
 LOG_FILE = "log.txt"
+
+# Lưu trạng thái nhiệm vụ theo từng ví để tránh gọi GET /quests mỗi round tốn proxy:
+# { wallet: {"daily_date": "YYYY-MM-DD", "weekly_week": "YYYY-Www", "onetime_done": True} }
+QUEST_TRACKER = {}
 
 
 def log(acc_idx, msg, color=Colors.RESET):
@@ -418,20 +423,54 @@ class BullshotClient:
                     break
 
     def run_quests(self):
+        """
+        - Daily quest: Chỉ chạy 1 lần/ngày
+        - Weekly quest: Chỉ chạy 1 lần/tuần
+        - One-time quest: Chỉ check 1 lần duy nhất đối với acc mới (Lv 1, 0 XP), sau đó bỏ qua vĩnh viễn
+        Nếu cả 3 đều đã xong trong kỳ -> Bỏ qua hoàn toàn không gọi GET /quests để tiết kiệm proxy.
+        """
+        now_utc = datetime.utcnow()
+        today_str = now_utc.strftime("%Y-%m-%d")
+        iso_year, iso_week, _ = now_utc.isocalendar()
+        week_str = f"{iso_year}-W{iso_week:02d}"
+
+        lvl = int(self.user_data.get("level", 1))
+        xp = int(self.user_data.get("xp", 0))
+        is_new_acc = (lvl <= 1 and xp == 0)
+
+        with quest_lock:
+            state = QUEST_TRACKER.setdefault(
+                self.wallet_address,
+                {
+                    "daily_date": None,
+                    "weekly_week": None,
+                    "onetime_done": not is_new_acc,
+                },
+            )
+            if not is_new_acc:
+                state["onetime_done"] = True
+
+            need_daily = state["daily_date"] != today_str
+            need_weekly = state["weekly_week"] != week_str
+            need_onetime = not state["onetime_done"]
+
+        if not need_daily and not need_weekly and not need_onetime:
+            return
+
         resp = self.request("GET", "/quests")
         if not resp or resp.status_code != 200:
             return
 
         quests_data = resp.json()
-        quest_list = (quests_data.get("daily") or []) + (quests_data.get("weekly") or []) + (quests_data.get("oneTime") or [])
+        quest_list = []
+        if need_daily:
+            quest_list.extend(quests_data.get("daily") or [])
+        if need_weekly:
+            quest_list.extend(quests_data.get("weekly") or [])
+        if need_onetime:
+            quest_list.extend(quests_data.get("oneTime") or [])
+
         pending_quests = [q for q in quest_list if q.get("status") != "claimed"]
-
-        if not pending_quests:
-            return
-
-        claimed_count = 0
-        total_gems = 0
-        total_xp = 0
 
         for q in pending_quests:
             qid = q.get("id")
@@ -459,13 +498,19 @@ class BullshotClient:
 
             r_claim = self.request("POST", "/quests/claim", {"questId": qid, "tweetUrl": tweet_url})
             if r_claim and r_claim.status_code == 200:
-                claimed_count += 1
-                total_gems += reward_gems
-                total_xp += reward_xp
                 log(
                     self.acc_idx,
                     f"Nhiệm vụ: {title} -> {Colors.GREEN}+{reward_gems} GEMS, +{reward_xp} XP{Colors.RESET}",
                 )
+
+        # Đánh dấu đã hoàn thành check trong ngày / tuần / vĩnh viễn (one-time)
+        with quest_lock:
+            state = QUEST_TRACKER[self.wallet_address]
+            if need_daily:
+                state["daily_date"] = today_str
+            if need_weekly:
+                state["weekly_week"] = week_str
+            state["onetime_done"] = True
 
     def get_mining_locations(self) -> list:
         """Lấy danh sách các mỏ đào từ server (kèm mỏ mặc định dự phòng)"""
@@ -473,7 +518,7 @@ class BullshotClient:
             "id": CONFIG["MINING_LOCATION_ID"],
             "name": "Greenstone Quarry",
             "energyCost": 10,
-            "requiredPower": 10,
+            "requiredPower": 0,
             "requiredLevel": 1,
             "durationSeconds": 600,
             "unlocked": True,
@@ -491,17 +536,32 @@ class BullshotClient:
         for loc in raw_list:
             if not isinstance(loc, dict):
                 continue
-            loc_id = loc.get("id") or loc.get("locationId")
-            if not loc_id:
+            loc_id = (loc.get("id") or loc.get("locationId") or "").strip()
+            loc_name = (loc.get("name") or "").strip()
+            # Bỏ qua các cave test rỗng tên trên server (cave-6ad9...)
+            if not loc_id or not loc_name or loc_id.startswith("cave-"):
                 continue
+
             locations.append({
                 "id": loc_id,
-                "name": loc.get("name") or loc_id,
+                "name": loc_name,
                 "energyCost": int(loc.get("energyCost") or loc.get("energy") or loc.get("cost") or 10),
-                "requiredPower": int(loc.get("requiredPower") or loc.get("minPower") or loc.get("powerRequired") or loc.get("reqPower") or 10),
-                "requiredLevel": int(loc.get("requiredLevel") or loc.get("minLevel") or loc.get("levelRequired") or 1),
+                "requiredPower": int(
+                    loc.get("miningPowerRequired")
+                    or loc.get("requiredPower")
+                    or loc.get("minPower")
+                    or loc.get("powerRequired")
+                    or loc.get("reqPower")
+                    or 0
+                ),
+                "requiredLevel": int(
+                    loc.get("levelRequired")
+                    or loc.get("requiredLevel")
+                    or loc.get("minLevel")
+                    or 1
+                ),
                 "durationSeconds": int(loc.get("durationSeconds") or loc.get("duration") or 600),
-                "unlocked": bool(loc.get("unlocked", loc.get("isUnlocked", True))),
+                "unlocked": True,
             })
 
         # Sắp xếp giảm dần theo Level yêu cầu -> Năng lượng -> Power để luôn ưu tiên bãi lớn nhất
@@ -656,32 +716,39 @@ class BullshotClient:
 
     def run_upgrades(self):
         """
-        Tự động nâng cấp:
-        - Tập trung ưu tiên số 1 vào Tốc độ đào (Speed)
-        - Mua Power tối đa đến MAX_MINING_POWER (507)
-        - Mua Cap Mana tối đa đến MAX_ENERGY_CAP (1000)
+        Tự động nâng cấp đua lên TARGET_LEVEL (25):
+        - Nâng Power đủ mốc MAX_MINING_POWER (250 - đủ mở bãi cuối Void Rift)
+        - Nâng Cap Mana đủ mốc MAX_ENERGY_CAP (700 - đủ thả 20 bãi 35 NL)
+        - Toàn bộ GEMS còn lại dồn 100% vào Max Speed
         """
         if not CONFIG["AUTO_UPGRADE"]:
             return
 
-        max_power = int(CONFIG.get("MAX_MINING_POWER", 507))
-        max_energy_cap = int(CONFIG.get("MAX_ENERGY_CAP", 1000))
+        target_level = int(CONFIG.get("TARGET_LEVEL", 25))
+        max_power = int(CONFIG.get("MAX_MINING_POWER", 250))
+        max_energy_cap = int(CONFIG.get("MAX_ENERGY_CAP", 700))
         failed_ids = set()
 
-        for _ in range(15):
-            self.refresh_user()
+        self.refresh_user()
+        if int(self.user_data.get("level", 1)) >= target_level:
+            return
+
+        resp_upg = self.request("GET", "/upgrades")
+        if not resp_upg or resp_upg.status_code != 200:
+            return
+
+        raw_upgs = resp_upg.json()
+        upgrades = raw_upgs if isinstance(raw_upgs, list) else (raw_upgs.get("upgrades") or [])
+        if not upgrades:
+            return
+
+        for _ in range(20):
+            if int(self.user_data.get("level", 1)) >= target_level:
+                break
+
             current_gems = float(self.user_data.get("gems", 0))
             mining_power = int(self.user_data.get("miningPower") or self.user_data.get("power") or 10)
             energy_cap = int(self.user_data.get("energyCapacity") or self.user_data.get("maxEnergy") or 100)
-
-            resp_upg = self.request("GET", "/upgrades")
-            if not resp_upg or resp_upg.status_code != 200:
-                break
-
-            raw_upgs = resp_upg.json()
-            upgrades = raw_upgs if isinstance(raw_upgs, list) else (raw_upgs.get("upgrades") or [])
-            if not upgrades:
-                break
 
             candidates = []
             for u in upgrades:
@@ -690,7 +757,7 @@ class BullshotClient:
                 uid = u.get("id")
                 if not uid or uid in failed_ids:
                     continue
-                if u.get("purchased") is True or u.get("isPurchased") is True:
+                if u.get("purchased") is True or u.get("isPurchased") is True or u.get("isCapped") is True:
                     continue
                 if u.get("unlocked") is False or u.get("isUnlocked") is False:
                     continue
@@ -704,16 +771,16 @@ class BullshotClient:
                     continue
 
                 text = f"{uid} {u.get('name', '')} {u.get('type', '')} {u.get('category', '')}".lower()
-                if any(k in text for k in ("speed", "fast", "time", "duration", "haste")):
-                    prio = 0  # Ưu tiên 1: Tốc độ đào
-                elif any(k in text for k in ("power", "strength", "drill", "pickaxe", "dmg")):
+                if any(k in text for k in ("power", "strength", "drill", "pickaxe", "dmg")):
                     if mining_power >= max_power:
                         continue
-                    prio = 1  # Ưu tiên 2: Power (max 507)
+                    prio = 0  # Đảm bảo đạt mốc Power 250
                 elif any(k in text for k in ("energy", "mana", "cap", "battery", "stamina")):
                     if energy_cap >= max_energy_cap:
                         continue
-                    prio = 2  # Ưu tiên 3: Cap Mana (max 1000)
+                    prio = 0  # Đảm bảo đạt mốc Mana 700 (không bị Speed hút cạn GEMS khi giá Mana > 350)
+                elif any(k in text for k in ("speed", "fast", "time", "duration", "haste")):
+                    prio = 1  # Sau khi đủ Power 250 & Mana 700 -> Dồn 100% vào Max Speed
                 else:
                     continue
 
@@ -729,15 +796,21 @@ class BullshotClient:
 
             resp_buy = self.request("POST", f"/upgrades/{upg_id}")
             if resp_buy and resp_buy.status_code == 200:
-                new_user = resp_buy.json().get("user") or {}
+                buy_data = resp_buy.json()
+                new_user = buy_data.get("user") or {}
                 if new_user:
                     self.user_data.update(new_user)
+                new_upg = buy_data.get("upgrade") or {}
+                if new_upg and "cost" in new_upg:
+                    target_upg["cost"] = new_upg["cost"]
                 new_lvl = self.user_data.get("level", 1)
                 new_pwr = self.user_data.get("miningPower") or self.user_data.get("power") or mining_power
                 new_cap = self.user_data.get("energyCapacity") or self.user_data.get("maxEnergy") or energy_cap
+                new_spd = self.user_data.get("miningSpeed", "")
+                spd_str = f" | SPD: {new_spd}" if new_spd != "" else ""
                 log(
                     self.acc_idx,
-                    f"Nâng cấp: {target_upg.get('name', upg_id)} (-{int(cost)} GEMS) -> Lv.{new_lvl} | PWR: {new_pwr} | Mana: {new_cap}",
+                    f"Nâng cấp: {target_upg.get('name', upg_id)} (-{int(cost)} GEMS) -> Lv.{new_lvl} | PWR: {new_pwr} | Mana: {new_cap}{spd_str}",
                     Colors.MAGENTA,
                 )
             else:
@@ -748,16 +821,16 @@ class BullshotClient:
             resp_stk = self.request("GET", "/staking/positions")
             if resp_stk and resp_stk.status_code == 200:
                 stk_positions = resp_stk.json() or []
-                claimed_stake = 0
+                claimed_stake = 0.0
                 for sp in stk_positions:
                     pos_id = sp.get("id")
-                    accrued = sp.get("accruedRewards", 0)
+                    accrued = float(sp.get("accruedRewards") or 0)
                     if accrued > 0:
                         r_clm = self.request("POST", f"/staking/positions/{pos_id}/claim")
                         if r_clm and r_clm.status_code == 200:
                             claimed_stake += accrued
                 if claimed_stake > 0:
-                    log(self.acc_idx, f"Claim lãi Stake: {Colors.GREEN}+{claimed_stake} GEMS{Colors.RESET}")
+                    log(self.acc_idx, f"Claim lãi Stake: {Colors.GREEN}+{claimed_stake:.4f} GEMS{Colors.RESET}")
 
         if CONFIG["AUTO_STAKE_GEMS"]:
             resp_inv = self.request("GET", "/user/inventory")
@@ -779,14 +852,16 @@ class BullshotClient:
                 log(self.acc_idx, f"Stake đá quý: {', '.join(staked_list)}", Colors.GREEN)
 
     def check_referrals(self):
-        resp = self.request("GET", "/referral/stats")
-        if resp and resp.status_code == 200:
-            stats = resp.json()
-            pending = stats.get("pendingGems", 0)
-            if pending > 0:
-                r_c = self.request("POST", "/referral/claim")
-                if r_c and r_c.status_code == 200:
-                    log(self.acc_idx, f"Claim Ref: {Colors.GREEN}+{pending} GEMS{Colors.RESET}")
+        pending = float(self.user_data.get("pendingReferralGems") or 0)
+        if pending <= 0:
+            resp = self.request("GET", "/referral/stats")
+            if resp and resp.status_code == 200:
+                pending = float(resp.json().get("pendingGems") or 0)
+        if pending > 0:
+            r_c = self.request("POST", "/referral/claim")
+            if r_c and r_c.status_code == 200:
+                claimed = r_c.json().get("claimedAmount", pending)
+                log(self.acc_idx, f"Claim Ref: {Colors.GREEN}+{claimed} GEMS{Colors.RESET}")
 
     def get_user_rank(self) -> str:
         """Lấy thứ hạng (Rank) hiện tại của ví từ thông tin user hoặc bảng xếp hạng"""
@@ -796,18 +871,31 @@ class BullshotClient:
             or self.user_data.get("leaderboardRank")
             or self.user_data.get("userRank")
         )
+        if isinstance(rank, dict):
+            rank = rank.get("rank")
+
         if rank is None:
             resp = self.request("GET", "/leaderboard")
             if resp and resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, dict):
-                    rank = (
-                        data.get("userRank")
-                        or data.get("myRank")
+                    raw_rank = (
+                        data.get("myRank")
+                        or data.get("userRank")
                         or data.get("rank")
-                        or (data.get("currentUser") or {}).get("rank")
+                        or data.get("currentUser")
                     )
-                    entries = data.get("leaderboard") or data.get("entries") or data.get("users") or []
+                    if isinstance(raw_rank, dict):
+                        rank = raw_rank.get("rank")
+                    else:
+                        rank = raw_rank
+                    entries = (
+                        data.get("topUsers")
+                        or data.get("leaderboard")
+                        or data.get("entries")
+                        or data.get("users")
+                        or []
+                    )
                 elif isinstance(data, list):
                     entries = data
                 else:
