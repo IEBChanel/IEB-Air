@@ -3,11 +3,14 @@ BULLSHOT GEM AUTO-FARM BOT
 -------------------------------------------------------------
 - Đa luồng (Multi-threading): Tùy chỉnh số luồng trong hàm get_config()
 - Giao diện Log tinh giản, tối ưu, tự động bật màu ANSI chuẩn trên Windows CMD
-- Auto Quests: Daily, Weekly, One-Time
-- Auto Mining: Đào mỏ 10 phút (Greenstone Quarry) & Auto Claim liên tục
-- Auto Swap: Tự động đổi toàn bộ quặng thô sang GEMS
-- Auto Upgrade: Tự động nâng cấp lấy +100 XP/lần để lên Level mục tiêu
+- Auto Quests: Daily, Weekly, One-Time (bao gồm MXH mới Facebook, Instagram, TikTok)
+- Auto Achievements: Tự động claim toàn bộ 12 mốc thành tựu (lên tới 17,450 GEMS)
+- Auto Crafting: Tự động chế tạo linh kiện (Steel Ingot, Bronze Wire...) trước khi Swap (+28% GEMS)
+- Auto Mining: Đào mỏ & Auto Claim liên tục tối ưu theo cấp độ & năng lượng
+- Auto Swap: Tự động đổi toàn bộ quặng thô & linh kiện thành phẩm sang GEMS
+- Auto Upgrade: Tự động nâng cấp lấy +100 XP/lần để đua Level mục tiêu
 - Auto Stake & Claim: Tự động nạp đá quý vào Staking Pool & thu hoạch lãi GEMS
+- Auto Bind Socials: Tự động liên kết danh tính MXH chuẩn Anti-Sybil (bind.py)
 - Hỗ trợ đa ví (account.txt) & đa proxy (proxy.txt)
 """
 
@@ -32,17 +35,23 @@ def get_config():
     """
     return {
         # Số luồng chạy cùng lúc (1 = chạy từng acc, 5-20 = chạy đa luồng tùy cấu hình máy & số acc)
-        "THREADS": 10,
+        "THREADS": 20,
 
         # Cấp độ mục tiêu (đạt cấp này sẽ ngưng nâng cấp để tích GEMS)
-        "TARGET_LEVEL": 25,
+        "TARGET_LEVEL": 35,
 
         # Tự động nâng cấp: Đủ Power 250 (mở bãi cuối) + Cap Mana 700 (20 bãi 35 NL), còn lại dồn 100% Max Speed
         "AUTO_UPGRADE": True,
         "MAX_MINING_POWER": 250,
-        "MAX_ENERGY_CAP": 350,
+        "MAX_ENERGY_CAP": 7000,
 
-        # Tự động đổi toàn bộ quặng thô (Iron Ore, Coal, Copper Ore...) sang GEMS
+        # Tự động nhận thưởng Thành tựu (Achievements) lên tới 17,450 GEMS
+        "AUTO_CLAIM_ACHIEVEMENTS": True,
+
+        # Tự động chế tạo (Crafting) linh kiện (Steel Ingot, Bronze Wire...) trước khi Swap (+28% GEMS)
+        "AUTO_CRAFTING": True,
+
+        # Tự động đổi toàn bộ quặng thô & linh kiện sang GEMS
         "AUTO_SWAP_ORES": True,
 
         # Tự động đem đá quý (Emerald, Sapphire, Ruby, Diamond...) đi Stake lấy lãi APY 18% - 35%
@@ -51,22 +60,29 @@ def get_config():
         # Tự động thu hoạch lãi GEMS từ các vị thế Staking
         "AUTO_CLAIM_STAKING": True,
 
+        # Tự động liên kết danh tính MXH (Telegram, Instagram, TikTok, Facebook) chuẩn Anti-Sybil
+        "AUTO_LINK_SOCIALS": True,
+
         # Thời gian delay thêm khi làm nhiệm vụ (giây)
         "QUEST_DELAY_MIN": 5.0,
         "QUEST_DELAY_MAX": 7.0,
 
         # Số máy đào tối đa chạy cùng lúc trên 1 acc (25 máy để thả đủ 20 bãi x 35 NL = 700 NL)
-        "MAX_MINERS": 25,
+        "MAX_MINERS": 5100,
 
         # Giãn cách giữa mỗi round (180 - 240 phút = 3 - 4 tiếng) để tiết kiệm proxy
-        "ROUND_DELAY_MIN_MINUTES": 180,
-        "ROUND_DELAY_MAX_MINUTES": 240,
+        "ROUND_DELAY_MIN_MINUTES": 10,
+        "ROUND_DELAY_MAX_MINUTES": 15,
 
         # Mỏ đào mặc định dự phòng
         "MINING_LOCATION_ID": "greenstone-quarry",
 
-        # Mã Ref mặc định
+        # Mã Ref mặc định (sử dụng khi refcode.txt trống)
         "DEFAULT_REF": "0x44aca053",
+
+        # Số lượng ref ngẫu nhiên cho mỗi mã trong refcode.txt (100 - 150 ref/code)
+        "REF_PER_CODE_MIN": 100,
+        "REF_PER_CODE_MAX": 150,
     }
 
 
@@ -78,6 +94,10 @@ def init_console():
     """Kích hoạt UTF-8 và mã màu ANSI cho Windows CMD để không bị lỗi ký tự ←[..."""
     if sys.platform == "win32":
         try:
+            os.system("")  # Bật ANSI escape sequences trên Windows 10/11
+        except Exception:
+            pass
+        try:
             sys.stdout.reconfigure(encoding="utf-8")
             sys.stderr.reconfigure(encoding="utf-8")
         except Exception:
@@ -87,16 +107,29 @@ def init_console():
             handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
             mode = ctypes.c_ulong()
             if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-                # 0x0004 = ENABLE_VIRTUAL_TERMINAL_PROCESSING
                 if kernel32.SetConsoleMode(handle, mode.value | 0x0004):
                     return True
-            return False
         except Exception:
-            return False
-    return True
+            pass
+
+    is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+    return is_tty
 
 
 ANSI_ENABLED = init_console()
+
+try:
+    import colorama
+    colorama.init(autoreset=True, strip=not ANSI_ENABLED)
+except Exception:
+    pass
+
+
+def clean_ansi(text: str) -> str:
+    """Xóa sạch các ký tự escape ANSI (chống hiện ←[...) nếu terminal không hỗ trợ"""
+    if not ANSI_ENABLED:
+        return re.sub(r"(\033|\x1b)\[[0-9;]*[a-zA-Z]", "", text)
+    return text
 
 
 class Colors:
@@ -115,19 +148,123 @@ class Colors:
 print_lock = threading.Lock()
 file_lock = threading.Lock()
 quest_lock = threading.Lock()
+ref_lock = threading.Lock()
 LOG_FILE = "log.txt"
+REFCODE_FILE = "refcode.txt"
 
 # Lưu trạng thái nhiệm vụ theo từng ví để tránh gọi GET /quests mỗi round tốn proxy:
 # { wallet: {"daily_date": "YYYY-MM-DD", "weekly_week": "YYYY-Www", "onetime_done": True} }
 QUEST_TRACKER = {}
 
 
+class RefCodeManager:
+    """
+    Quản lý đọc cố định file refcode.txt (vĩnh viễn không ghi đè/xuất thêm) và phân bổ mã ref:
+    - Tự động nhận diện các ví gốc đã có trong refcode.txt (giữ nguyên DEFAULT_REF).
+    - Toàn bộ các ví mới (chưa có trong refcode.txt) sẽ được CHIA ĐỀU (Round-Robin)
+      vào danh sách mã ref cố định trong refcode.txt (tối đa 100-150 ref/mã), tuyệt đối không dồn vào DEFAULT_REF.
+    """
+
+    def __init__(self):
+        self.codes = []
+        self.root_wallets = set()
+        self.assigned_wallets = {}
+        self.code_quotas = {}
+        self.code_used = {}
+        self.rr_idx = 0
+
+    def init_from_file(self, filename=REFCODE_FILE):
+        loaded_codes = []
+        loaded_root_wallets = set()
+        default_ref = CONFIG.get("DEFAULT_REF", "0x44aca053").strip().lower()
+
+        if os.path.exists(filename):
+            try:
+                with open(filename, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        wallet_part = ""
+                        code_part = line
+                        if "|" in line:
+                            parts = line.split("|", 1)
+                            wallet_part = parts[0].strip().lower()
+                            code_part = parts[1].strip()
+                        if "/" in code_part:
+                            code_part = code_part.rstrip("/").split("/")[-1].strip()
+                        if wallet_part.startswith("0x") and len(wallet_part) == 42:
+                            loaded_root_wallets.add(wallet_part)
+                        # Không đưa mã ref của acc chính (DEFAULT_REF) vào vòng xoay chia ref cho ví mới
+                        if code_part and code_part.lower() != default_ref and code_part not in loaded_codes:
+                            loaded_codes.append(code_part)
+            except Exception as e:
+                log(None, f"Lỗi đọc {filename}: {e}", Colors.RED)
+
+        with ref_lock:
+            self.codes = loaded_codes
+            self.root_wallets = loaded_root_wallets
+            self.assigned_wallets.clear()
+            self.rr_idx = 0
+
+            min_q = int(CONFIG.get("REF_PER_CODE_MIN", 100))
+            max_q = int(CONFIG.get("REF_PER_CODE_MAX", 150))
+
+            # Hạn mức ngẫu nhiên 100-150 ref cho mỗi mã trong refcode.txt
+            self.code_quotas = {
+                c: random.Random(c).randint(min_q, max(min_q, max_q))
+                for c in self.codes
+            }
+            self.code_used = {c: 0 for c in self.codes}
+
+    def get_login_ref_code(self, wallet_address: str) -> str:
+        default_ref = CONFIG.get("DEFAULT_REF", "0x44aca053")
+        w = wallet_address.strip().lower()
+        with ref_lock:
+            if not self.codes:
+                return default_ref
+
+            # Nếu là ví cũ nằm trong danh sách gốc refcode.txt -> Giữ nguyên DEFAULT_REF
+            if w in self.root_wallets:
+                return default_ref
+
+            # Nếu ví mới này đã được gán mã ref ở round trước -> Dùng lại đúng mã đó
+            if w in self.assigned_wallets:
+                return self.assigned_wallets[w]
+
+            # Ví mới: Chia đều theo vòng tròn (Round-Robin) qua toàn bộ danh sách mã trong refcode.txt
+            num_codes = len(self.codes)
+            assigned = None
+            for _ in range(num_codes):
+                candidate = self.codes[self.rr_idx % num_codes]
+                self.rr_idx += 1
+                if self.code_used.get(candidate, 0) < self.code_quotas.get(candidate, 150):
+                    self.code_used[candidate] = self.code_used.get(candidate, 0) + 1
+                    assigned = candidate
+                    break
+
+            # Nếu toàn bộ mã đều đã đầy 100-150 ref thì vẫn xoay vòng đều trong refcode.txt (không dồn về DEFAULT_REF)
+            if not assigned:
+                assigned = self.codes[self.rr_idx % num_codes]
+                self.rr_idx += 1
+
+            self.assigned_wallets[w] = assigned
+            return assigned
+
+
+REF_MANAGER = RefCodeManager()
+
+
 def log(acc_idx, msg, color=Colors.RESET):
     """Hàm in log ngắn gọn, an toàn đa luồng: [Giờ] [Acc X] Nội dung"""
     now = datetime.now().strftime("%H:%M:%S")
     tag = f"[Acc {acc_idx}]" if acc_idx is not None else "[BOT]"
+    if ANSI_ENABLED:
+        formatted = f"{Colors.DIM}[{now}]{Colors.RESET} {Colors.CYAN}{tag:<8}{Colors.RESET} {color}{msg}{Colors.RESET}"
+    else:
+        formatted = f"[{now}] {tag:<8} {clean_ansi(msg)}"
     with print_lock:
-        print(f"{Colors.DIM}[{now}]{Colors.RESET} {Colors.CYAN}{tag:<8}{Colors.RESET} {color}{msg}{Colors.RESET}", flush=True)
+        print(formatted, flush=True)
 
 
 def reset_log_file(cycle: int):
@@ -178,42 +315,13 @@ def format_rewards(rewards_data) -> str:
     return str(rewards_data)
 
 
-# ==================== BỘ TẠO USERNAME X (TWITTER) NGẪU NHIÊN ====================
-# 50 tên phổ biến (Anh, Mỹ & Châu Âu hệ Latin)
-FIRST_NAMES = [
-    "james", "john", "robert", "michael", "william", "david", "richard", "joseph", "thomas", "charles",
-    "liam", "noah", "oliver", "lucas", "mateo", "leo", "hugo", "enzo", "luca", "marco",
-    "hans", "erik", "ivan", "milan", "felix", "oscar", "louis", "theo", "max", "arthur",
-    "emma", "olivia", "ava", "mia", "sofia", "chloe", "elena", "clara", "nina", "eva",
-    "alice", "julia", "laura", "sara", "anna", "marie", "lucia", "paula", "marta", "lena",
-]
-
-# 50 họ phổ biến (Anh, Mỹ & Châu Âu hệ Latin)
-LAST_NAMES = [
-    "smith", "jones", "brown", "davis", "miller", "wilson", "moore", "taylor", "clark", "hall",
-    "young", "king", "wright", "lopez", "hill", "scott", "green", "adams", "baker", "nelson",
-    "carter", "perry", "rossi", "silva", "costa", "meyer", "weber", "novak", "kowal", "leblanc",
-    "dupont", "moreau", "garcia", "gomez", "romano", "conti", "bruno", "ricci", "fischer", "wagner",
-    "becker", "schulz", "bauer", "klein", "wolf", "braun", "hofer", "huber", "moser", "marino",
-]
-
-
-def generate_x_handle() -> str:
-    """
-    Tạo username X ngẫu nhiên giống tool reg X thật:
-    50 tên x 50 họ x 3 kiểu ghép + 5 chữ số ngẫu nhiên (750 triệu biến thể)
-    """
-    first = random.choice(FIRST_NAMES)
-    last = random.choice(LAST_NAMES)
-    digits = "".join(random.choices("0123456789", k=5))
-    style = random.randint(1, 3)
-
-    if style == 1:
-        return f"{first}{last}{digits}"
-    elif style == 2:
-        return f"{first}_{last}{digits}"
-    else:
-        return f"{last}_{first}{digits}"
+# ==================== MODULE LIÊN KẾT IDENTITIES (ANTI-SYBIL) ====================
+from bind import (
+    generate_x_handle,
+    generate_social_identities,
+    bind_twitter_for_client,
+    bind_all_socials_for_client,
+)
 
 
 # ==================== PARSER PROXY & ACCOUNT ====================
@@ -282,12 +390,23 @@ class BullshotClient:
     RAW_ORES = {
         "iron-ore": 0.25,
         "coal": 0.35,
+        "granite-chunk": 0.4,
         "copper-ore": 0.6,
+        "quartz": 0.8,
         "sulfur": 1.2,
-        "cryo-shard": 3.0,
-        "void-dust": 8.0,
+        "cinnabar": 1.5,
+        "silver-ore": 2.0,
         "steel-ingot": 2.5,
+        "cryo-shard": 3.0,
         "bronze-wire": 3.5,
+        "gold-ore": 6.0,
+        "void-dust": 8.0,
+        "meteorite-fragment": 10.0,
+        "platinum-ore": 15.0,
+        "thermal-core": 25.0,
+        "gold-circuit": 40.0,
+        "cryo-coolant": 50.0,
+        "void-reactor": 450.0,
     }
 
     GEMSTONE_POOLS = {
@@ -349,6 +468,10 @@ class BullshotClient:
         for _ in range(retries):
             try:
                 response = self.session.request(method, url, json=json_data, timeout=25)
+                if response.status_code in (403, 429, 502, 503, 504):
+                    self.rotate_proxy()
+                    time.sleep(1.5)
+                    continue
                 if response.status_code == 401 and endpoint != "/auth/login":
                     if self.login(silent=True):
                         return self.request(method, endpoint, json_data, retries=retries - 1)
@@ -361,8 +484,13 @@ class BullshotClient:
         return None
 
     def login(self, silent: bool = False) -> bool:
-        resp_nonce = self.request("POST", "/auth/nonce", {"walletAddress": self.wallet_address})
-        if not resp_nonce or resp_nonce.status_code != 200:
+        for _ in range(3):
+            resp_nonce = self.request("POST", "/auth/nonce", {"walletAddress": self.wallet_address})
+            if resp_nonce and resp_nonce.status_code == 200:
+                break
+            self.rotate_proxy()
+            time.sleep(1.5)
+        else:
             log(self.acc_idx, "Lỗi lấy nonce đăng nhập", Colors.RED)
             return False
 
@@ -376,11 +504,12 @@ class BullshotClient:
         if not signature.startswith("0x"):
             signature = "0x" + signature
 
+        ref_to_use = REF_MANAGER.get_login_ref_code(self.wallet_address)
         login_payload = {
             "walletAddress": self.wallet_address,
             "signature": signature,
             "message": message,
-            "refCode": CONFIG["DEFAULT_REF"],
+            "refCode": ref_to_use,
         }
         resp_login = self.request("POST", "/auth/login", login_payload)
         if not resp_login or resp_login.status_code != 200:
@@ -412,15 +541,10 @@ class BullshotClient:
         return self.user_data
 
     def ensure_twitter_linked(self):
-        twitter_handle = self.user_data.get("twitterHandle")
-        if not twitter_handle:
-            for _ in range(3):
-                auto_handle = generate_x_handle()
-                resp = self.request("POST", "/user/link-twitter", {"twitterHandle": auto_handle})
-                if resp and resp.status_code == 200:
-                    self.user_data["twitterHandle"] = auto_handle
-                    log(self.acc_idx, f"Liên kết X: @{auto_handle}", Colors.GREEN)
-                    break
+        return bind_twitter_for_client(self)
+
+    def ensure_socials_linked(self):
+        return bind_all_socials_for_client(self)
 
     def run_quests(self):
         """
@@ -434,21 +558,15 @@ class BullshotClient:
         iso_year, iso_week, _ = now_utc.isocalendar()
         week_str = f"{iso_year}-W{iso_week:02d}"
 
-        lvl = int(self.user_data.get("level", 1))
-        xp = int(self.user_data.get("xp", 0))
-        is_new_acc = (lvl <= 1 and xp == 0)
-
         with quest_lock:
             state = QUEST_TRACKER.setdefault(
                 self.wallet_address,
                 {
                     "daily_date": None,
                     "weekly_week": None,
-                    "onetime_done": not is_new_acc,
+                    "onetime_done": False,
                 },
             )
-            if not is_new_acc:
-                state["onetime_done"] = True
 
             need_daily = state["daily_date"] != today_str
             need_weekly = state["weekly_week"] != week_str
@@ -471,46 +589,223 @@ class BullshotClient:
             quest_list.extend(quests_data.get("oneTime") or [])
 
         pending_quests = [q for q in quest_list if q.get("status") != "claimed"]
+        all_daily_ok = True
+        all_weekly_ok = True
 
         for q in pending_quests:
             qid = q.get("id")
             title = q.get("title", qid)
             status = q.get("status")
+            period = q.get("period", "")
             reward_gems = q.get("rewardGems", 0)
             reward_xp = q.get("rewardXp", 0)
             action_type = q.get("actionType")
             delay_seconds = q.get("delaySeconds", 10)
+            seconds_left = q.get("secondsLeft", delay_seconds)
 
             if status not in ("started", "ready"):
                 r_start = self.request("POST", "/quests/start", {"questId": qid})
                 if not r_start or r_start.status_code != 200:
+                    if period == "daily":
+                        all_daily_ok = False
+                    elif period == "weekly":
+                        all_weekly_ok = False
                     continue
                 delay_seconds = r_start.json().get("delaySeconds", delay_seconds)
-
-            wait_time = max(random.uniform(CONFIG["QUEST_DELAY_MIN"], CONFIG["QUEST_DELAY_MAX"]), float(delay_seconds))
-            time.sleep(wait_time)
-
-            tweet_url = ""
-            if action_type == "verify_tweet" or qid in ("tw_weekly_post", "tw_weekly_qrt", "tw_start_mining_tweet"):
-                handle = self.user_data.get("twitterHandle") or generate_x_handle()
-                fake_status_id = random.randint(1885000000000000000, 1889999999999999999)
-                tweet_url = f"https://x.com/{handle}/status/{fake_status_id}"
-
-            r_claim = self.request("POST", "/quests/claim", {"questId": qid, "tweetUrl": tweet_url})
-            if r_claim and r_claim.status_code == 200:
-                log(
-                    self.acc_idx,
-                    f"Nhiệm vụ: {title} -> {Colors.GREEN}+{reward_gems} GEMS, +{reward_xp} XP{Colors.RESET}",
+                # Cộng thêm 1.5s đệm để đồng hồ trên server chắc chắn đã về 0 trước khi claim
+                wait_time = max(
+                    random.uniform(CONFIG["QUEST_DELAY_MIN"], CONFIG["QUEST_DELAY_MAX"]),
+                    float(delay_seconds) + 1.5,
                 )
+                time.sleep(wait_time)
+            elif status == "started" and seconds_left > 0:
+                time.sleep(float(seconds_left) + 1.5)
+            else:
+                # Nếu status == "ready" (đã đếm ngược xong từ trước) thì chỉ nghỉ nhẹ 1s rồi claim ngay
+                time.sleep(1.0)
 
-        # Đánh dấu đã hoàn thành check trong ngày / tuần / vĩnh viễn (one-time)
+            claimed_ok = False
+            max_claim_attempts = 4 if (action_type == "verify_tweet" or qid in ("tw_weekly_post", "tw_weekly_qrt", "tw_start_mining_tweet")) else 2
+            for attempt in range(max_claim_attempts):
+                tweet_url = ""
+                if action_type == "verify_tweet" or qid in ("tw_weekly_post", "tw_weekly_qrt", "tw_start_mining_tweet"):
+                    handle = self.user_data.get("twitterHandle") or generate_x_handle()
+                    fake_status_id = random.randint(1885000000000000000, 1889999999999999999)
+                    tweet_url = f"https://x.com/{handle}/status/{fake_status_id}"
+
+                r_claim = self.request("POST", "/quests/claim", {"questId": qid, "tweetUrl": tweet_url})
+                if r_claim is not None and r_claim.status_code == 200:
+                    log(
+                        self.acc_idx,
+                        f"Nhiệm vụ: {title} -> {Colors.GREEN}+{reward_gems} GEMS, +{reward_xp} XP{Colors.RESET}",
+                    )
+                    claimed_ok = True
+                    break
+                time.sleep(2.0)
+
+            if not claimed_ok:
+                if period == "daily":
+                    all_daily_ok = False
+                elif period == "weekly":
+                    all_weekly_ok = False
+
+        # Chỉ đánh dấu đã xong ngày/tuần khi toàn bộ nhiệm vụ của ngày/tuần đó đã claim thành công
         with quest_lock:
             state = QUEST_TRACKER[self.wallet_address]
-            if need_daily:
+            if need_daily and all_daily_ok:
                 state["daily_date"] = today_str
-            if need_weekly:
+            if need_weekly and all_weekly_ok:
                 state["weekly_week"] = week_str
             state["onetime_done"] = True
+
+    def run_achievements(self):
+        """Tự động kiểm tra và nhận thưởng toàn bộ Thành tựu (Achievements) lên tới 17,450 GEMS"""
+        if not CONFIG.get("AUTO_CLAIM_ACHIEVEMENTS", True):
+            return
+
+        resp = self.request("GET", "/achievements")
+        if not resp or resp.status_code != 200:
+            return
+
+        data = resp.json()
+        achievements = data if isinstance(data, list) else (data.get("achievements") or [])
+        if not achievements:
+            return
+
+        claimed_any = False
+        total_reward = 0
+
+        for ach in achievements:
+            if not isinstance(ach, dict):
+                continue
+            aid = ach.get("id")
+            title = ach.get("title") or aid
+            reward = int(ach.get("reward") or ach.get("rewardGems") or 0)
+            is_claimed = ach.get("claimed", False)
+            is_claimable = ach.get("claimable", False)
+            is_unlocked = ach.get("unlocked", False)
+
+            if not is_claimed and (is_claimable or is_unlocked):
+                r_claim = self.request("POST", "/achievements/claim", {"achievementId": aid})
+                if r_claim and r_claim.status_code == 200:
+                    claimed_any = True
+                    cdata = r_claim.json() if r_claim.text else {}
+                    rw = int(cdata.get("rewardGems", reward))
+                    total_reward += rw
+                    log(
+                        self.acc_idx,
+                        f"Thành tựu: {title} -> {Colors.GREEN}+{rw} GEMS{Colors.RESET}",
+                    )
+                time.sleep(0.5)
+
+        if claimed_any:
+            self.refresh_user()
+
+    def run_crafting(self):
+        """
+        Tự động chế tạo (Crafting) tối ưu trước khi Swap:
+        - Biến nguyên liệu thô thành Steel Ingot, Bronze Wire, Thermal Core...
+        - Tăng giá trị GEMS thu về khi Swap (+28% lợi nhuận)
+        - Tiêu thụ hạn mức chế tạo hàng ngày (Daily Craft Limit: 20/20)
+        """
+        if not CONFIG.get("AUTO_CRAFTING", True):
+            return
+
+        resp_recipes = self.request("GET", "/crafting/recipes")
+        if not resp_recipes or resp_recipes.status_code != 200:
+            return
+
+        data = resp_recipes.json()
+        daily_limit = int(data.get("dailyLimit", 20))
+        daily_used = int(data.get("dailyUsed", 0))
+        remaining_crafts = max(0, daily_limit - daily_used)
+        if remaining_crafts <= 0:
+            return
+
+        raw_recipes = data.get("recipes") if isinstance(data, dict) else data
+        recipes = raw_recipes if isinstance(raw_recipes, list) else []
+        if not recipes:
+            return
+
+        resp_inv = self.request("GET", "/user/inventory")
+        if not resp_inv or resp_inv.status_code != 200:
+            return
+
+        inv_items = resp_inv.json() or []
+        inventory = {}
+        for it in inv_items:
+            aid = (it.get("assetId") or "").strip().lower()
+            name = (it.get("name") or "").strip().lower()
+            qty = int(it.get("quantity") or 0)
+            if aid:
+                inventory[aid] = inventory.get(aid, 0) + qty
+            if name and name != aid:
+                inventory[name] = inventory.get(name, 0) + qty
+
+        # Ưu tiên chế tạo các linh kiện (parts) không tốn GEMS để tối ưu Swap
+        crafted_summary = []
+        for recipe in recipes:
+            if remaining_crafts <= 0:
+                break
+            if not isinstance(recipe, dict):
+                continue
+
+            rid = recipe.get("id")
+            output_name = recipe.get("output", rid)
+            inputs = recipe.get("inputs") or []
+            if not inputs:
+                continue
+
+            # Bỏ qua recipe tốn GEMS (tools, gear) để dành GEMS nâng cấp
+            gems_cost = int(recipe.get("gems") or 0)
+            if gems_cost > 0:
+                continue
+
+            # Tính số lượng tối đa có thể craft từ nguyên liệu hiện có
+            can_craft_qty = 999999
+            for in_item in inputs:
+                if isinstance(in_item, (list, tuple)) and len(in_item) >= 2:
+                    in_key = str(in_item[0]).strip().lower()
+                    req_qty = int(in_item[1])
+                elif isinstance(in_item, dict):
+                    in_key = str(in_item.get("name") or in_item.get("assetId") or in_item.get("id")).strip().lower()
+                    req_qty = int(in_item.get("quantity") or in_item.get("amount") or 1)
+                else:
+                    continue
+
+                have_qty = inventory.get(in_key, 0)
+                if have_qty < req_qty:
+                    can_craft_qty = 0
+                    break
+                can_craft_qty = min(can_craft_qty, have_qty // req_qty)
+
+            craft_qty = min(can_craft_qty, remaining_crafts, 50)
+            if craft_qty > 0:
+                r_craft = self.request("POST", "/crafting/craft", {"recipeId": rid, "quantity": craft_qty})
+                if r_craft and r_craft.status_code == 200:
+                    remaining_crafts -= craft_qty
+                    crafted_summary.append(f"{craft_qty}x {output_name}")
+                    # Cập nhật inventory nội bộ
+                    for in_item in inputs:
+                        if isinstance(in_item, (list, tuple)) and len(in_item) >= 2:
+                            in_key = str(in_item[0]).strip().lower()
+                            req_qty = int(in_item[1])
+                        elif isinstance(in_item, dict):
+                            in_key = str(in_item.get("name") or in_item.get("assetId") or in_item.get("id")).strip().lower()
+                            req_qty = int(in_item.get("quantity") or in_item.get("amount") or 1)
+                        else:
+                            continue
+                        inventory[in_key] = max(0, inventory.get(in_key, 0) - req_qty * craft_qty)
+                    out_key = output_name.strip().lower()
+                    inventory[out_key] = inventory.get(out_key, 0) + craft_qty
+                time.sleep(0.5)
+
+        if crafted_summary:
+            log(
+                self.acc_idx,
+                f"Chế tạo: {', '.join(crafted_summary)}",
+                Colors.CYAN,
+            )
 
     def get_mining_locations(self) -> list:
         """Lấy danh sách các mỏ đào từ server (kèm mỏ mặc định dự phòng)"""
@@ -597,8 +892,9 @@ class BullshotClient:
             elif status == "active":
                 active_positions.append(pos)
 
-        # Nếu vừa thu hoạch mỏ, tự động Swap quặng & Nâng cấp luôn để có thêm Power/NL trước khi thả máy mới
+        # Nếu vừa thu hoạch mỏ, tự động Chế tạo -> Swap quặng & Nâng cấp luôn để có thêm Power/NL trước khi thả máy mới
         if claimed_any:
+            self.run_crafting()
             self.run_swap_ores()
             self.run_upgrades()
 
@@ -927,11 +1223,26 @@ def process_account(idx: int, acc: dict, proxies: list) -> float:
         return time.time() + 600
 
     client.ensure_twitter_linked()
+    if CONFIG.get("AUTO_LINK_SOCIALS", True):
+        try:
+            client.ensure_socials_linked()
+        except Exception as e:
+            log(idx, f"Lỗi liên kết socials: {e}", Colors.RED)
 
     try:
         client.run_quests()
     except Exception as e:
         log(idx, f"Lỗi nhiệm vụ: {e}", Colors.RED)
+
+    try:
+        client.run_achievements()
+    except Exception as e:
+        log(idx, f"Lỗi thành tựu: {e}", Colors.RED)
+
+    try:
+        client.run_crafting()
+    except Exception as e:
+        log(idx, f"Lỗi chế tạo: {e}", Colors.RED)
 
     try:
         client.run_swap_ores()
@@ -953,6 +1264,11 @@ def process_account(idx: int, acc: dict, proxies: list) -> float:
         client.run_staking()
     except Exception as e:
         log(idx, f"Lỗi stake: {e}", Colors.RED)
+
+    try:
+        client.run_achievements()
+    except Exception as e:
+        log(idx, f"Lỗi thành tựu: {e}", Colors.RED)
 
     try:
         client.check_referrals()
@@ -1024,10 +1340,19 @@ def main():
         log(None, "Không tìm thấy tài khoản trong account.txt!", Colors.RED)
         return
 
+    REF_MANAGER.init_from_file(filename=REFCODE_FILE)
+
     threads = max(1, min(int(CONFIG.get("THREADS", 5)), len(accounts)))
     print(
         f"{Colors.GREEN}{Colors.BOLD}=== BULLSHOT AUTO BOT | Acc: {len(accounts)} | Proxy: {len(proxies)} | Luồng: {threads} | Target Lv: {CONFIG['TARGET_LEVEL']} ==={Colors.RESET}",
         flush=True,
+    )
+    old_cnt = len(REF_MANAGER.root_wallets)
+    new_cnt = max(0, len(accounts) - old_cnt)
+    log(
+        None,
+        f"Đã khóa cố định {old_cnt} ví gốc trong {REFCODE_FILE} | Chia đều {new_cnt} ví mới cho {len(REF_MANAGER.codes)} mã ref (Max {CONFIG['REF_PER_CODE_MIN']}-{CONFIG['REF_PER_CODE_MAX']} ref/code)",
+        Colors.GREEN,
     )
 
     cycle = 1
